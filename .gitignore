@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+cache/
+config.json
+auto.key
+auto.crt
+samples/hangzhou/DJI_0291.MOV
+samples/kenya-oblique/source.lrf

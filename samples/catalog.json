@@ -1,0 +1,26 @@
+[
+  {
+    "id": "synthetic",
+    "label": "合成样例 · 西湖 · 先垂直再斜看",
+    "video": "samples/flight.mp4",
+    "srt": "samples/flight.srt"
+  },
+  {
+    "id": "hangzhou",
+    "label": "杭州小牙坞 · 真实斜视",
+    "video": "samples/hangzhou/flight.mp4",
+    "srt": "samples/hangzhou/flight.srt"
+  },
+  {
+    "id": "kenya",
+    "label": "肯尼亚草原 · 真实垂直向下",
+    "video": "samples/kenya/flight.mp4",
+    "srt": "samples/kenya/flight.srt"
+  },
+  {
+    "id": "kenya-oblique",
+    "label": "肯尼亚草原 · 真实斜视",
+    "video": "samples/kenya-oblique/flight.mp4",
+    "srt": "samples/kenya-oblique/flight.srt"
+  }
+]

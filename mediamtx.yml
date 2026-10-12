@@ -1,0 +1,24 @@
+logLevel: info
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path:
+      - action: read
+        path:
+      - action: playback
+        path:
+rtsp: true
+rtspAddress: :8554
+rtmp: true
+rtmpAddress: :1935
+hls: true
+hlsAddress: :8888
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+paths:
+  all_others:

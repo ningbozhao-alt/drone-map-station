@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>态势地面站</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>态势地面站</h1>
+      <p>实时视频贴到地图上，和灾前影像对比。平面地面模型，斜视只作态势。</p>
+    </div>
+    <div class="pills" id="pills"></div>
+  </header>
+  <main>
+    <section class="map-wrap">
+      <canvas id="map"></canvas>
+      <div id="bmap" hidden></div>
+      <div class="map-tools">
+        <button type="button" id="follow" class="on">跟随飞机</button>
+        <button type="button" id="styleStreet" class="on" title="百度街道平面图，需要联网">平面图</button>
+        <button type="button" id="styleSat" title="百度卫星图，需要联网">卫星图</button>
+        <button type="button" id="styleOffline" title="用已经下载到本机的卫星瓦片，断网也能看">离线卫星</button>
+        <button type="button" id="play" class="on" title="样例录像继续播">播放</button>
+        <button type="button" id="holdNadir" title="停在这段录像里云台最朝下的一帧">垂直向下</button>
+        <button type="button" id="holdOblique" title="停在这段录像里云台最朝前的一帧">向前斜看</button>
+      </div>
+      <div class="legend" id="legend">卫星影像 · WGS84 · © Esri</div>
+    </section>
+    <aside>
+      <section>
+        <h2>贴地所用画面</h2>
+        <div class="preview">
+          <img id="frame" alt="当前视频帧" />
+          <div class="hud" id="hud">等待姿态</div>
+        </div>
+        <label class="source">片源
+          <select id="sourcePick"></select>
+        </label>
+        <p class="hint" id="sourceHint">选择一段已经放在本机的录像，或切到直播。</p>
+      </section>
+      <section>
+        <h2>姿态</h2>
+        <dl id="telem"></dl>
+      </section>
+      <section>
+        <h2>图传预览</h2>
+        <iframe id="webrtc" title="MediaMTX WebRTC"></iframe>
+        <p class="hint" id="webrtcHint"></p>
+      </section>
+      <section>
+        <h2>对比</h2>
+        <label>百度 AK <input id="ak" placeholder="留空则用离线卫星" /></label>
+        <button type="button" id="useAk">重新加载百度</button>
+        <label>贴地透明度 <input id="opacity" type="range" min="0" max="100" value="75" /></label>
+        <label>卷帘 <input id="swipe" type="range" min="0" max="100" value="0" /></label>
+        <label class="check"><input id="showPre" type="checkbox" /> 显示灾前影像</label>
+        <label class="check"><input id="diff" type="checkbox" /> 显示变化</label>
+        <p class="hint" id="diffText"></p>
+      </section>
+      <section>
+        <h2>地标校核</h2>
+        <p class="hint">输入地标的 WGS84 真值，再在地图上点它目前被画到的位置。改正数会平移后续视场。</p>
+        <label>纬度 <input id="trueLat" type="number" step="0.000001" /></label>
+        <label>经度 <input id="trueLon" type="number" step="0.000001" /></label>
+        <div class="row">
+          <button type="button" id="pick">点选偏差</button>
+          <button type="button" id="applyBias">应用改正</button>
+          <button type="button" id="resetBias">清除</button>
+        </div>
+        <p class="hint" id="biasText"></p>
+      </section>
+    </aside>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
