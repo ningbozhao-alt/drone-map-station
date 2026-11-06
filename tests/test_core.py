@@ -172,7 +172,132 @@ class MqttTest(unittest.TestCase):
         self.assertAlmostEqual(telem.pitch, -88)
 
 
+class HudOcrTest(unittest.TestCase):
+    def test_m30t_panel_text(self):
+        from app.aircraft.dji_m30t_hud import parse_m30t_hud_text
+
+        text = """
+目标纬度 41.856954
+云台信息                 经度 81.664126
+俯角: 10.90deg      H: 1413.8
+原始俯角: 10.90deg     X: 4635961.8
+方位角: 356.60deg      Y: 14555146.6
+无人机纬度 41.856952
+无人机经度 81.664127
+"""
+        parsed = parse_m30t_hud_text(text)
+        self.assertAlmostEqual(parsed["pitch_down"], 10.90, places=1)
+        self.assertAlmostEqual(parsed["yaw"], 356.60, places=1)
+        self.assertAlmostEqual(parsed["lat"], 41.856952, places=5)
+        self.assertAlmostEqual(parsed["lon"], 81.664127, places=5)
+
+    def test_hz_gcs_panel_text(self):
+        from app.aircraft.hz_gcs_hud import parse_hz_gcs_text
+        from app.aircraft.registry import get_model
+
+        text = """
+状态管理
+飞机状态
+航向 359.0°
+相对高度 1000.0m
+位姿信息
+经度 119.008178
+纬度 31.761480
+海拔高度 1000.0m
+航向角 359.0°
+俯仰角 0.0°
+横滚角 1.0°
+吊舱状态
+方位 0.0°
+俯仰 -90.0°
+综合信息
+"""
+        parsed = parse_hz_gcs_text(text)
+        self.assertAlmostEqual(parsed["lon"], 119.008178, places=5)
+        self.assertAlmostEqual(parsed["lat"], 31.761480, places=5)
+        self.assertAlmostEqual(parsed["rel_alt"], 1000.0, places=1)
+        self.assertAlmostEqual(parsed["yaw"], 359.0, places=1)
+        self.assertAlmostEqual(parsed["pitch"], -90.0, places=1)
+        model = get_model("hz_gcs")
+        self.assertIsNotNone(model)
+        self.assertEqual(model.label.startswith("HZ"), True)
+
+    def test_hz_gcs_ocr_dropped_decimal(self):
+        from app.aircraft.hz_gcs_hud import parse_hz_gcs_text
+
+        # 模拟 Tesseract 丢掉小数点
+        text = """
+位姿信息
+经度 119008178
+纬度 31761480
+航向角 3590
+吊舱状态
+俯仰 -900
+飞机状态
+相对高度 10000m
+"""
+        parsed = parse_hz_gcs_text(text)
+        self.assertAlmostEqual(parsed["lon"], 119.008178, places=4)
+        self.assertAlmostEqual(parsed["lat"], 31.761480, places=4)
+        self.assertAlmostEqual(parsed["yaw"], 359.0, places=1)
+        self.assertAlmostEqual(parsed["pitch"], -90.0, places=1)
+        self.assertAlmostEqual(parsed["rel_alt"], 1000.0, places=1)
+
+    def test_hz_gcs_classify_hits_adaptive(self):
+        from app.aircraft.hz_gcs_hud import _NumHit, _classify_hits
+
+        hits = [
+            _NumHit(119008178, "119008178", 0.80, 0.23, 80),
+            _NumHit(31761480, "31761480", 0.80, 0.27, 80),
+            _NumHit(1000.0, "1000.0m", 0.65, 0.31, 70),
+            _NumHit(359.0, "359.0", 0.65, 0.22, 90),
+            _NumHit(900, "900\"", 0.95, 0.31, 70),
+        ]
+        parsed = _classify_hits(hits)
+        self.assertAlmostEqual(parsed["lon"], 119.008178, places=4)
+        self.assertAlmostEqual(parsed["lat"], 31.761480, places=4)
+        self.assertAlmostEqual(parsed["rel_alt"], 1000.0, places=1)
+        self.assertAlmostEqual(parsed["yaw"], 359.0, places=1)
+        self.assertAlmostEqual(parsed["pitch"], -90.0, places=1)
+
+        # 样图 OCR 噪声：假纬度整数、0.0、359000001
+        noisy = [
+            _NumHit(20420011, "20420011"),
+            _NumHit(119008178, "119008178"),
+            _NumHit(31.761480, "31.761480"),
+            _NumHit(0.0, "0.0"),
+            _NumHit(10000, "10000"),
+            _NumHit(-90.0, "-90.0"),
+            _NumHit(350, "350"),
+            _NumHit(1280, "1280"),
+            _NumHit(359000001, "359000001"),
+        ]
+        parsed2 = _classify_hits(noisy)
+        self.assertAlmostEqual(parsed2["lon"], 119.008178, places=4)
+        self.assertAlmostEqual(parsed2["lat"], 31.761480, places=4)
+        self.assertAlmostEqual(parsed2["rel_alt"], 1000.0, places=1)
+        self.assertAlmostEqual(parsed2["yaw"], 359.0, places=0)
+        self.assertAlmostEqual(parsed2["pitch"], -90.0, places=1)
+
+    def test_merger_manual_height_with_ocr(self):
+        from app.telemetry_merge import TelemetryMerger
+
+        merger = TelemetryMerger(require_height=True, default_hfov=64, default_vfov=48)
+        merger.ocr = {"lat": 41.85, "lon": 81.66, "yaw": 356.6, "pitch": -10.9}
+        telem, status, missing = merger.merge()
+        self.assertIsNone(telem)
+        self.assertIn("height_agl", missing)
+        merger.set_manual({"height_agl": 80}, locked=["height_agl"])
+        telem, status, missing = merger.merge()
+        self.assertIsNotNone(telem)
+        self.assertEqual(missing, [])
+        self.assertAlmostEqual(telem.height_agl, 80)
+        self.assertEqual(status["height_agl"], "manual")
+        self.assertEqual(status["lat"], "ocr")
+
+
 class CatalogTest(unittest.TestCase):
+
     def test_steepest_and_level_times(self):
         cues = [
             Telemetry(0, 0, 10, 10, 0, -40, 0, 60, 40),

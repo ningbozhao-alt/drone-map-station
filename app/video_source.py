@@ -103,6 +103,7 @@ class RtspReader:
         self.pipeline = None
         self.sink = None
         self._gst = None
+        self._misses = 0
 
     def _open(self):
         Gst = _gst()
@@ -117,6 +118,7 @@ class RtspReader:
         self.sink = self.pipeline.get_by_name("sink")
         self.pipeline.set_state(Gst.State.PLAYING)
         self.decoder = "mppvideodec"
+        self._misses = 0
 
     def read(self, timeout_s: float = 0.4):
         if self.pipeline is None:
@@ -127,13 +129,26 @@ class RtspReader:
         Gst = self._gst
         sample = self.sink.emit("try-pull-sample", int(timeout_s * Gst.SECOND))
         if sample is None:
+            self._misses += 1
+            # 推流中断后再恢复时，旧 pipeline 会一直拉不到帧，需重建
+            if self._misses >= 8:
+                self.close()
             return None
+        self._misses = 0
         try:
             return sample_to_bgr(sample)
         except Exception:
+            self.close()
             return None
 
     def close(self):
         if self.pipeline is not None and self._gst is not None:
             self.pipeline.set_state(self._gst.State.NULL)
             self.pipeline = None
+            self.sink = None
+        self._misses = 0
+
+    def reopen(self, url: str | None = None):
+        if url:
+            self.url = url
+        self.close()

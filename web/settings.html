@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>设置 · 态势地面站</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="settings-page">
+  <header>
+    <div>
+      <h1>设置</h1>
+      <p>流地址、姿态源、机型分模块配置。保存后立即生效，不必重启服务。</p>
+    </div>
+    <a class="nav-link" href="/">返回态势</a>
+  </header>
+  <main class="settings-main">
+    <section class="card" id="streamCard">
+      <h2>视频流</h2>
+
+      <div class="stream-callout">
+        <p class="stream-callout-title">桌面推流工具 / OBS / 遥控器录屏软件 —— 只填这一项</p>
+        <label>RTMP 推流地址
+          <input id="rtmpIngest" type="text" spellcheck="false" placeholder="rtmp://板子IP:1935/live" />
+        </label>
+        <p class="hint">把上面整串复制到推流软件的「RTMP 地址」。同机联调可用 <code>rtmp://127.0.0.1:1935/live</code>。</p>
+        <div class="row">
+          <button type="button" id="copyRtmp">复制给推流工具</button>
+          <button type="button" id="useLocalRtmp">改成 127.0.0.1</button>
+          <button type="button" id="useLanRtmp">改成当前板子 IP</button>
+        </div>
+      </div>
+
+      <div class="stream-secondary">
+        <p class="stream-secondary-title">地面站内部地址（一般不用改；不是推流工具填的）</p>
+        <label>站内取流 RTSP（本站拉帧做 OCR / 贴地）
+          <input id="rtspUrl" type="text" spellcheck="false" />
+        </label>
+        <label>浏览器图传预览页（WebRTC，给人看的）
+          <input id="webrtcPage" type="text" spellcheck="false" />
+        </label>
+        <p class="hint" id="rtmpLocalHint"></p>
+      </div>
+
+      <div class="row">
+        <button type="button" id="saveStream">保存并应用</button>
+      </div>
+      <p class="hint" id="streamMsg"></p>
+    </section>
+
+    <section class="card" id="mqttCard">
+      <h2>姿态源 · MQTT</h2>
+      <label class="check"><input id="mqttEnabled" type="checkbox" /> 启用 MQTT OSD</label>
+      <label>主机 <input id="mqttHost" type="text" /></label>
+      <label>端口 <input id="mqttPort" type="number" /></label>
+      <label>主题 <input id="mqttTopic" type="text" /></label>
+      <div class="row">
+        <button type="button" id="saveMqtt">保存并应用</button>
+      </div>
+      <p class="hint" id="mqttMsg"></p>
+    </section>
+
+    <section class="card" id="aircraftCard">
+      <h2>机型与 OCR</h2>
+      <label class="check"><input id="ocrEnabled" type="checkbox" /> 直播时启用 HUD OCR</label>
+      <label>无人机型号
+        <select id="aircraftId"></select>
+      </label>
+      <p class="hint" id="aircraftNotes"></p>
+      <label>默认水平视场 ° <input id="hfov" type="number" step="0.1" /></label>
+      <label>默认垂直视场 ° <input id="vfov" type="number" step="0.1" /></label>
+      <div class="row">
+        <button type="button" id="saveAircraft">保存并应用</button>
+      </div>
+      <p class="hint" id="aircraftMsg"></p>
+    </section>
+  </main>
+  <script src="/settings.js"></script>
+</body>
+</html>

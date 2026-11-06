@@ -55,39 +55,31 @@ class PreviewPublisher:
             self._path = None
 
     def _stop_locked(self):
-        self._signal_publishers(signal.SIGTERM)
-        deadline = time.time() + 1.5
-        while time.time() < deadline and self._publisher_pids():
-            time.sleep(0.05)
-        if self._publisher_pids():
-            self._signal_publishers(signal.SIGKILL)
-        if self._proc is not None:
+        """只停本类拉起的样例推流，勿 pkill 同地址上的外部桌面推流。"""
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             try:
-                self._proc.wait(timeout=1)
+                proc.terminate()
+            except ProcessLookupError:
+                return
+        try:
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 pass
-        self._proc = None
-
-    def _signal_publishers(self, sig: int):
-        for pid in self._publisher_pids():
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                pass
-
-    def _publisher_pids(self) -> list[int]:
-        try:
-            out = subprocess.check_output(["pgrep", "-af", RTMP_URL], text=True)
-        except subprocess.CalledProcessError:
-            return []
-        pids = []
-        for line in out.splitlines():
-            pid_text, _, cmd = line.partition(" ")
-            exe = cmd.split()[0] if cmd else ""
-            if not exe.endswith("ffmpeg") or RTMP_URL not in cmd:
-                continue
-            try:
-                pids.append(int(pid_text))
-            except ValueError:
-                continue
-        return pids

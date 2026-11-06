@@ -10,9 +10,12 @@
   <header>
     <div>
       <h1>态势地面站</h1>
-      <p>实时视频贴到地图上，和灾前影像对比。平面地面模型，斜视只作态势。</p>
+      <p>实时视频按云台姿态地理贴合；支持与基准影像比对。基于平面地面模型：正射贴地显示，斜视用于态势标绘。</p>
     </div>
-    <div class="pills" id="pills"></div>
+    <div class="header-right">
+      <div class="pills" id="pills"></div>
+      <a class="nav-link" href="/settings.html">设置</a>
+    </div>
   </header>
   <main>
     <section class="map-wrap">
@@ -39,11 +42,34 @@
         <label class="source">片源
           <select id="sourcePick"></select>
         </label>
+        <label class="source">无人机型号
+          <select id="aircraftPick"></select>
+        </label>
         <p class="hint" id="sourceHint">选择一段已经放在本机的录像，或切到直播。</p>
+        <p class="hint" id="aircraftHint"></p>
       </section>
       <section>
         <h2>姿态</h2>
         <dl id="telem"></dl>
+        <p class="hint warn" id="missingHint" hidden></p>
+      </section>
+      <section>
+        <h2>手动补齐</h2>
+        <p class="hint">OCR/MQTT 缺项时勾选并填写后再点「应用锁定」。俯仰向下为负（垂直约 -90）。M30T 至少锁定离地高；视场可留空用默认。</p>
+        <div class="override-grid" id="overrideGrid">
+          <label class="check field"><input type="checkbox" data-lock="lat" /> 纬度 <input type="number" step="0.000001" data-field="lat" /></label>
+          <label class="check field"><input type="checkbox" data-lock="lon" /> 经度 <input type="number" step="0.000001" data-field="lon" /></label>
+          <label class="check field"><input type="checkbox" data-lock="height_agl" /> 离地高 m <input type="number" step="0.1" data-field="height_agl" /></label>
+          <label class="check field"><input type="checkbox" data-lock="yaw" /> 航向 ° <input type="number" step="0.1" data-field="yaw" /></label>
+          <label class="check field"><input type="checkbox" data-lock="pitch" /> 俯仰 ° <input type="number" step="0.1" data-field="pitch" /></label>
+          <label class="check field"><input type="checkbox" data-lock="roll" /> 横滚 ° <input type="number" step="0.1" data-field="roll" /></label>
+          <label class="check field"><input type="checkbox" data-lock="hfov" /> 水平视场 <input type="number" step="0.1" data-field="hfov" /></label>
+          <label class="check field"><input type="checkbox" data-lock="vfov" /> 垂直视场 <input type="number" step="0.1" data-field="vfov" /></label>
+        </div>
+        <div class="row">
+          <button type="button" id="applyOverride">应用锁定</button>
+          <button type="button" id="clearOverride">清除手动</button>
+        </div>
       </section>
       <section>
         <h2>图传预览</h2>

@@ -226,8 +226,17 @@ function renderReadout() {
     return;
   }
   const viewClass = state.view === "oblique" ? "oblique" : state.view === "nadir" ? "nadir" : "";
+  const srcLabel = {
+    srt: "姿态来自录像",
+    mqtt: "姿态来自 MQTT",
+    ocr: "姿态来自 OCR",
+    manual: "姿态来自手动",
+    "ocr+mix": "姿态 OCR+补齐",
+    "manual+mix": "姿态手动+其他",
+    mixed: "姿态混合",
+  };
   const att = state.wgs
-    ? (state.telemetry_source === "srt" ? "姿态来自录像" : "姿态来自直播")
+    ? (srcLabel[state.telemetry_source] || `姿态 ${state.telemetry_source || ""}`)
     : "无姿态";
   pills.innerHTML = [
     `<span class="pill ${viewClass}">${state.view || "等待"}</span>`,
@@ -237,6 +246,7 @@ function renderReadout() {
   ].join("");
   const rows = [
     ["时间", `${fmt(state.time_s, 1)} / ${fmt(state.duration_s, 1)} s`],
+    ["机型", state.aircraft_label || state.aircraft_id || "—"],
     ["纬度 WGS84", fmt(state.wgs && state.wgs.lat, 6)],
     ["经度 WGS84", fmt(state.wgs && state.wgs.lon, 6)],
     ["BD09 纬度", fmt(state.bd09 && state.bd09.lat, 6)],
@@ -250,11 +260,33 @@ function renderReadout() {
     ["说明", state.message || ""],
   ];
   document.getElementById("telem").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  const miss = document.getElementById("missingHint");
+  if (miss) {
+    if (state.missing_fields && state.missing_fields.length) {
+      miss.hidden = false;
+      miss.textContent = `缺项：${state.missing_fields.join("、")}（可在下方手动锁定）`;
+    } else {
+      miss.hidden = true;
+      miss.textContent = "";
+    }
+  }
+  const aircraftPick = document.getElementById("aircraftPick");
+  if (aircraftPick && state.aircraft_id && [...aircraftPick.options].some((o) => o.value === state.aircraft_id)) {
+    aircraftPick.value = state.aircraft_id;
+  }
+  const aircraftHint = document.getElementById("aircraftHint");
+  if (aircraftHint) {
+    aircraftHint.textContent = state.ocr_enabled === false
+      ? "直播 OCR 已关闭，可在设置页打开。"
+      : (state.mode === "rtmp" ? "直播优先 OCR，缺项用手动或 MQTT。" : "");
+  }
   const hud = document.getElementById("hud");
   if (state.wgs) {
     hud.innerHTML = `俯仰 ${fmt(state.pitch, 1)}°　航向 ${fmt(state.yaw, 1)}°　高度 ${fmt(state.height_agl, 0)} m<br>${fmt(state.wgs.lat, 6)}, ${fmt(state.wgs.lon, 6)}`;
   } else {
-    hud.textContent = state.mode === "file" ? "这条样例录像没有读到姿态" : "直播还没有姿态，需要飞机 OSD";
+    hud.textContent = state.mode === "file"
+      ? "这条样例录像没有读到姿态"
+      : (state.message || "直播还没有完整姿态");
   }
   const ratio = state.diff_ratio || 0;
   document.getElementById("diffText").textContent = `相对灾前影像的变化像素约占视场 ${Math.round(ratio * 100)}%。`;
@@ -277,7 +309,7 @@ function renderReadout() {
       const want = state.mode === "rtmp" ? "rtmp" : `file:${state.clip_id || ""}`;
       if ([...pick.options].some((opt) => opt.value === want) && pick.value !== want) pick.value = want;
       hint.textContent = state.mode === "rtmp"
-        ? "直播画面来自 RTMP，姿态要由飞机 MQTT 送来。"
+        ? "直播来自推流。推流工具请到「设置」复制 RTMP 推流地址（不要填 RTSP/预览页）。姿态可用 OCR / MQTT / 手动补齐。"
         : (state.clip_label || "选择一段已经放在本机的录像。");
     }
   }
@@ -395,6 +427,84 @@ async function loadSources() {
   if ([...pick.options].some((opt) => opt.value === want)) pick.value = want;
 }
 
+async function loadAircraft() {
+  const data = await (await fetch("/api/aircraft")).json();
+  const pick = document.getElementById("aircraftPick");
+  if (!pick) return;
+  pick.innerHTML = "";
+  for (const model of data.models || []) {
+    const opt = document.createElement("option");
+    opt.value = model.id;
+    opt.textContent = model.label;
+    pick.appendChild(opt);
+  }
+  if (data.active && [...pick.options].some((o) => o.value === data.active)) pick.value = data.active;
+}
+
+document.getElementById("aircraftPick")?.addEventListener("change", async () => {
+  const pick = document.getElementById("aircraftPick");
+  await postJson("/api/aircraft", { id: pick.value });
+});
+
+document.getElementById("applyOverride")?.addEventListener("click", async () => {
+  const values = {};
+  const locked = [];
+  const miss = document.getElementById("missingHint");
+  let err = "";
+  document.querySelectorAll("#overrideGrid [data-field]").forEach((input) => {
+    const key = input.getAttribute("data-field");
+    const lock = document.querySelector(`#overrideGrid [data-lock="${key}"]`);
+    const raw = (input.value || "").trim();
+    const num = raw === "" ? NaN : Number(raw);
+    if (lock && lock.checked) {
+      if (raw === "" || Number.isNaN(num)) {
+        err = `勾选锁定后必须填写数值（${key}）`;
+        return;
+      }
+      if ((key === "hfov" || key === "vfov") && num <= 1) {
+        err = "水平/垂直视场需大于 1°，或不要勾选锁定以使用机型默认值";
+        return;
+      }
+      values[key] = num;
+      locked.push(key);
+    } else if (raw !== "" && !Number.isNaN(num)) {
+      values[key] = num;
+    }
+  });
+  if (err) {
+    if (miss) {
+      miss.hidden = false;
+      miss.textContent = err;
+    }
+    return;
+  }
+  if (!locked.length) {
+    if (miss) {
+      miss.hidden = false;
+      miss.textContent = "请至少勾选并填写一项后再点「应用锁定」。俯仰向下为负（垂直约 -90）。";
+    }
+    return;
+  }
+  const res = await postJson("/api/telemetry_override", { values, locked });
+  if (!res.ok) {
+    if (miss) {
+      miss.hidden = false;
+      miss.textContent = "应用锁定失败，请重试。";
+    }
+    return;
+  }
+  if (miss) {
+    miss.hidden = false;
+    miss.textContent = `已锁定 ${locked.join("、")}。俯仰向下请填负数（如 -90）；视场可不锁，用机型默认。`;
+  }
+});
+
+document.getElementById("clearOverride")?.addEventListener("click", async () => {
+  await postJson("/api/telemetry_override", { clear: true });
+  document.querySelectorAll("#overrideGrid [data-field]").forEach((input) => { input.value = ""; });
+  document.querySelectorAll("#overrideGrid [data-lock]").forEach((box) => { box.checked = false; });
+});
+
 let mapStyle = localStorage.getItem("mapStyle") || "street";
 let lastPan = 0;
 let lastGround = 0;
@@ -508,6 +618,7 @@ async function boot() {
   }
   resize();
   await loadSources();
+  await loadAircraft();
 }
 boot();
 

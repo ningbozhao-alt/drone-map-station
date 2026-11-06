@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.aircraft.registry import default_model_id, get_model
 from app.catalog import cue_marks, load_catalog
 from app.compare import colorize_difference
 from app.coord import bd09_to_wgs84, distance_m, enu_meters, offset_wgs, wgs84_to_bd09, wgs84_to_gcj02
@@ -17,6 +18,7 @@ from app.geometry import corners_to_wgs, project_corners, warp_north_up
 from app.mqtt_client import MqttSubscriber
 from app.preview_publish import PreviewPublisher
 from app.telemetry import Telemetry, parse_osd, parse_srt
+from app.telemetry_merge import TelemetryMerger
 from app.video_source import RtspReader, decode_file
 
 
@@ -59,12 +61,28 @@ class Station:
         self._last_heavy = 0.0
         self._last_bounds = None
         self._diff_ratio = 0.0
+        self._ocr_last = 0.0
+        self._ocr_busy = False
+        self._fields_status: dict = {}
+        self._missing_fields: list[str] = []
+        self.merger = TelemetryMerger(
+            default_hfov=float(config.get("hfov_deg", 64)),
+            default_vfov=float(config.get("vfov_deg", 48)),
+        )
+        self._sync_aircraft_flags()
         self.mqtt = MqttSubscriber(
             config.get("mqtt_host", "127.0.0.1"),
             int(config.get("mqtt_port", 1883)),
             config.get("mqtt_topic", "thing/product/+/osd"),
             self._on_mqtt,
         )
+        self._mqtt_enabled = bool(config.get("mqtt_enabled", True))
+
+    def _sync_aircraft_flags(self):
+        model = get_model(self.config.get("aircraft_id") or default_model_id())
+        self.merger.default_hfov = float(self.config.get("hfov_deg", model.hfov_deg if model else 64))
+        self.merger.default_vfov = float(self.config.get("vfov_deg", model.vfov_deg if model else 48))
+        self.merger.require_height = bool(model.requires_manual_height) if model else False
 
     def load(self):
         pre_path = self.root / self.config.get("pre_image", "samples/pre_disaster.png")
@@ -81,7 +99,39 @@ class Station:
             self.clip_id = clip["id"]
             self.frames, self.cues, self.decoder = self._read_clip(clip)
             self.preview.publish(self.root / clip["video"])
-        self.mqtt.start()
+        if self._mqtt_enabled:
+            self.mqtt.start()
+
+    def apply_settings(self, changed: list[str]):
+        """设置页保存后热更新。"""
+        self._sync_aircraft_flags()
+        if "rtsp_url" in changed:
+            self.rtsp.reopen(self.config.get("rtsp_url", "rtsp://127.0.0.1:8554/live"))
+        mqtt_keys = {"mqtt_host", "mqtt_port", "mqtt_topic", "mqtt_enabled"}
+        if mqtt_keys & set(changed):
+            enabled = bool(self.config.get("mqtt_enabled", True))
+            self._mqtt_enabled = enabled
+            self.mqtt.stop()
+            if enabled:
+                self.mqtt = MqttSubscriber(
+                    self.config.get("mqtt_host", "127.0.0.1"),
+                    int(self.config.get("mqtt_port", 1883)),
+                    self.config.get("mqtt_topic", "thing/product/+/osd"),
+                    self._on_mqtt,
+                )
+                self.mqtt.start()
+            else:
+                with self.lock:
+                    self.mqtt_telem = None
+                    self.mqtt_rx = 0.0
+
+    def set_telemetry_override(self, values: dict, locked: list[str] | None = None):
+        with self.lock:
+            self.merger.set_manual(values, locked)
+
+    def clear_telemetry_override(self):
+        with self.lock:
+            self.merger.clear_manual()
 
     def _clip_by_id(self, clip_id: str | None):
         if not clip_id:
@@ -117,14 +167,24 @@ class Station:
             if clip["id"] == self.clip_id:
                 label = clip["label"]
                 break
+        model = get_model(self.config.get("aircraft_id") or default_model_id())
         return {
             "clip_id": self.clip_id,
             "clip_label": label,
             "loading": self.loading,
+            "aircraft_id": model.id if model else "",
+            "aircraft_label": model.label if model else "",
+            "ocr_enabled": bool(self.config.get("ocr_enabled", True)),
+            "fields_status": dict(self._fields_status),
+            "missing_fields": list(self._missing_fields),
+            "manual_locked": sorted(self.merger.locked),
+            "webrtc_page": self.config.get("webrtc_page", "http://127.0.0.1:8889/live/"),
             **cue_marks(self.cues, self.fps),
         }
 
     def _on_mqtt(self, _topic: str, payload: bytes):
+        if not self._mqtt_enabled:
+            return
         try:
             data = json.loads(payload.decode("utf-8"))
         except Exception:
@@ -146,6 +206,7 @@ class Station:
     def select(self, mode: str, clip_id: str | None = None):
         if mode == "rtmp":
             self.preview.stop()
+            self.rtsp.reopen()
             with self.lock:
                 self._load_gen += 1
                 self._pending = None
@@ -227,6 +288,64 @@ class Station:
             self.bias_north = 0.0
             self.track_wgs.clear()
 
+    def _maybe_ocr(self, frame: np.ndarray):
+        """OCR 放到后台线程，避免 HZ 识别 10~30s 卡住直播取帧。"""
+        if not self.config.get("ocr_enabled", True):
+            return
+        now = time.time()
+        model = get_model(self.config.get("aircraft_id") or default_model_id())
+        if model is None:
+            return
+        min_interval = 18.0 if getattr(model, "id", "") == "hz_gcs" else 0.35
+        if now - self._ocr_last < min_interval or self._ocr_busy:
+            return
+        self._ocr_last = now
+        self._ocr_busy = True
+        frame_copy = frame.copy()
+        threading.Thread(
+            target=self._ocr_worker,
+            args=(frame_copy, model.id),
+            name="hud-ocr",
+            daemon=True,
+        ).start()
+
+    def _ocr_worker(self, frame: np.ndarray, model_id: str):
+        try:
+            model = get_model(model_id)
+            if model is None:
+                return
+            raw = model.parse_hud(frame)
+            mapped: dict[str, float] = {}
+            if "lat" in raw:
+                mapped["lat"] = raw["lat"]
+            if "lon" in raw:
+                mapped["lon"] = raw["lon"]
+            if "yaw" in raw:
+                mapped["yaw"] = raw["yaw"]
+            if "pitch_down" in raw:
+                mapped["pitch"] = -abs(raw["pitch_down"]) if model.negate_pitch else raw["pitch_down"]
+            elif "pitch" in raw:
+                mapped["pitch"] = raw["pitch"]
+            if "roll" in raw:
+                mapped["roll"] = raw["roll"]
+            if "rel_alt" in raw:
+                mapped["rel_alt"] = raw["rel_alt"]
+            with self.lock:
+                self.merger.ocr = mapped
+        except Exception:
+            pass
+        finally:
+            self._ocr_busy = False
+
+    def _live_telem(self) -> Telemetry | None:
+        with self.lock:
+            mqtt = self.mqtt_telem if (self.mqtt_rx and time.time() - self.mqtt_rx < 2.0) else None
+            self.merger.mqtt = mqtt
+            telem, status, missing = self.merger.merge()
+            self._fields_status = status
+            self._missing_fields = missing
+            return telem
+
     def run(self):
         next_tick = time.perf_counter()
         while not self.stop_event.is_set():
@@ -277,14 +396,17 @@ class Station:
                 else:
                     next_tick = time.perf_counter()
             else:
-                frame = self.rtsp.read()
-                with self.lock:
-                    telem = self.mqtt_telem if (self.mqtt_rx and time.time() - self.mqtt_rx < 2.0) else None
+                frame = self.rtsp.read(timeout_s=0.8)
                 if frame is None:
-                    self._publish_wait("等待 RTSP 直播。请确认 MediaMTX 已收到 RTMP。")
-                    self.stop_event.wait(0.3)
+                    self._publish_wait("等待 RTSP 直播。请到设置页确认取流地址，并确认 MediaMTX 已收到推流。")
+                    self.stop_event.wait(0.2)
                     continue
-                self._publish(frame, telem, "rtmp", heavy=True)
+                # 先出画面，OCR 后台跑，保证网页实时刷新
+                telem = self._live_telem()
+                model = get_model(self.config.get("aircraft_id") or default_model_id())
+                drape_frame = model.crop_camera(frame) if model else frame
+                self._publish(drape_frame, telem, "rtmp", heavy=True, preview_frame=frame)
+                self._maybe_ocr(frame)
 
     def _step_file(self):
         if not self.frames:
@@ -293,12 +415,18 @@ class Station:
         frame = self.frames[self.index]
         telem = self.cues[self.index]
         self.index = (self.index + 1) % len(self.frames)
+        with self.lock:
+            self._fields_status = {k: "srt" for k in ("lat", "lon", "yaw", "pitch", "height_agl")}
+            self._missing_fields = []
         self._publish(frame, telem, "file", heavy=True)
 
     def _publish_index(self, index: int):
         frame = self.frames[index]
         telem = self.cues[index]
         self.index = index
+        with self.lock:
+            self._fields_status = {k: "srt" for k in ("lat", "lon", "yaw", "pitch", "height_agl")}
+            self._missing_fields = []
         self._publish(frame, telem, "file", heavy=True)
 
     def _publish_wait(self, message: str):
@@ -309,15 +437,23 @@ class Station:
                 "mode": self.mode,
                 "message": message,
                 "decoder": self.decoder,
-                "mqtt_connected": self.mqtt.connected,
+                "mqtt_connected": self.mqtt.connected if self._mqtt_enabled else False,
                 **self._clip_state(),
             }
 
-    def _publish(self, frame: np.ndarray, telem: Telemetry | None, mode: str, heavy: bool = True):
+    def _publish(
+        self,
+        frame: np.ndarray,
+        telem: Telemetry | None,
+        mode: str,
+        heavy: bool = True,
+        preview_frame: np.ndarray | None = None,
+    ):
         now = time.perf_counter()
         if heavy and not self.paused and now - self._last_heavy < 0.35:
             heavy = False
-        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        show = preview_frame if preview_frame is not None else frame
+        ok, jpg = cv2.imencode(".jpg", show, [cv2.IMWRITE_JPEG_QUALITY, 70])
         jpg_bytes = jpg.tobytes() if ok else b""
         drape_bytes = b""
         diff_bytes = b""
@@ -358,7 +494,7 @@ class Station:
             "frame_w": width,
             "frame_h": height,
             "drape": None,
-            "mqtt_connected": self.mqtt.connected,
+            "mqtt_connected": self.mqtt.connected if self._mqtt_enabled else False,
             "bias_east_m": self.bias_east,
             "bias_north_m": self.bias_north,
             "pre": _public_pre(self.pre_bounds),
@@ -369,7 +505,8 @@ class Station:
             if mode == "file":
                 note = "样例录像没有和画面对齐的姿态字幕。"
             else:
-                note = "有画面，还没有姿态。直播需要飞机通过 MQTT 发送 OSD。"
+                miss = "、".join(self._missing_fields) if self._missing_fields else "姿态"
+                note = f"有画面，还缺贴地所需：{miss}。可在侧栏手动锁定，或检查 OCR/MQTT。"
             base.update({"view": "no-telemetry", "message": note})
             return base
         lat, lon = offset_wgs(telem.lat, telem.lon, self.bias_east, self.bias_north)

@@ -10,11 +10,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app.aircraft.registry import list_models
 from app.catalog import load_catalog
+from app.settings_store import apply_section, load_raw, public_settings, save_raw
 from app.station import Station
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
+CONFIG_PATH = ROOT / "config.json"
 TILE_CACHE = ROOT / "cache" / "tiles"
 TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 _TILE_PATH = re.compile(r"^/tiles/(\d+)/(\d+)/(\d+)\.jpg$")
@@ -78,6 +81,25 @@ class Handler(BaseHTTPRequestHandler):
             cfg["webrtc_page"] = cfg.get("webrtc_page", "http://127.0.0.1:8889/live/")
             self._json(200, cfg)
             return
+        if path == "/api/settings":
+            self._json(200, public_settings(self.station.config))
+            return
+        if path == "/api/aircraft":
+            self._json(200, {"models": list_models(), "active": self.station.config.get("aircraft_id")})
+            return
+        if path == "/api/telemetry_override":
+            with self.station.lock:
+                self._json(
+                    200,
+                    {
+                        "manual": dict(self.station.merger.manual),
+                        "locked": sorted(self.station.merger.locked),
+                        "ocr": dict(self.station.merger.ocr),
+                        "fields_status": dict(self.station._fields_status),
+                        "missing_fields": list(self.station._missing_fields),
+                    },
+                )
+            return
         state, frame, drape, diff, pre = self.station.snapshot()
         if path == "/api/frame.jpg":
             self._send(200 if frame else 404, frame or b"", "image/jpeg")
@@ -104,6 +126,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         self._send(200, file_path.read_bytes(), mime)
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        try:
+            body = self._read_json()
+            if path == "/api/settings":
+                section = body.get("section")
+                if not section:
+                    raise ValueError("缺少 section")
+                result = apply_section(self.station.config, section, body)
+                save_raw(CONFIG_PATH, self.station.config)
+                self.station.apply_settings(result["changed"])
+                self._json(200, {"ok": True, **result, "settings": public_settings(self.station.config)})
+                return
+        except Exception as exc:
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        self._json(404, {"ok": False})
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -134,6 +174,29 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/calibrate/reset":
                 self.station.clear_bias()
                 self._json(200, {"ok": True})
+                return
+            if path == "/api/aircraft":
+                model_id = str(body.get("id") or "").strip()
+                result = apply_section(self.station.config, "aircraft", {"aircraft_id": model_id})
+                save_raw(CONFIG_PATH, self.station.config)
+                self.station.apply_settings(result["changed"])
+                self._json(200, {"ok": True, "active": model_id, "settings": public_settings(self.station.config)})
+                return
+            if path == "/api/telemetry_override":
+                if body.get("clear"):
+                    self.station.clear_telemetry_override()
+                else:
+                    self.station.set_telemetry_override(body.get("values") or {}, body.get("locked"))
+                self._json(200, {"ok": True})
+                return
+            if path == "/api/settings":
+                section = body.get("section")
+                if not section:
+                    raise ValueError("缺少 section")
+                result = apply_section(self.station.config, section, body)
+                save_raw(CONFIG_PATH, self.station.config)
+                self.station.apply_settings(result["changed"])
+                self._json(200, {"ok": True, **result, "settings": public_settings(self.station.config)})
                 return
         except Exception as exc:
             self._json(400, {"ok": False, "error": str(exc)})
@@ -211,8 +274,12 @@ def prefetch_offline_tiles():
 
 
 def load_config() -> dict:
-    path = ROOT / "config.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    config = load_raw(CONFIG_PATH)
+    config.setdefault("aircraft_id", "dji_m30t_wide")
+    config.setdefault("ocr_enabled", True)
+    config.setdefault("mqtt_enabled", True)
+    config.setdefault("rtmp_hint_port", 1935)
+    return config
 
 
 def main():
